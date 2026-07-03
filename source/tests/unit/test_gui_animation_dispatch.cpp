@@ -1,4 +1,6 @@
+#include "animations/AnimationCounter.h"
 #include "animations/AnimationPlaceholder.h"
+#include "animations/AnimationTimer.h"
 #include "controllers/SimulationEventController.h"
 #include "extensions/GuiExtensionManager.h"
 #include "extensions/GuiExtensionPluginCatalog.h"
@@ -10,6 +12,7 @@
 #include "kernel/simulator/PluginInformation.h"
 #include "kernel/simulator/PluginManager.h"
 #include "kernel/simulator/Simulator.h"
+#include "kernel/simulator/essentialPlugins/Counter.h"
 #include "kernel/simulator/essentialPlugins/Entity.h"
 #include "kernel/simulator/essentialPlugins/StatisticsCollector.h"
 #include "plugins/components/DiscreteProcessing/Release.h"
@@ -495,6 +498,77 @@ TEST(GuiAnimationDispatch, NotifyWithNullExtensionManagerDoesNotCrash) {
 
     scene.notifyEntityMovePluginAnimations(seize, nullptr);
     scene.notifyAfterProcessPluginAnimations(enter, nullptr);
+}
+
+// Nuclear (core) animations — clock, counters and statistics collectors — belong to the GUI
+// base and must keep working even when no domain graphical plugin is loaded. This guards the
+// Theme 5 requirement of consolidating core animations independently of the plugin extensions.
+TEST(GuiCoreAnimations, NuclearAnimationsRunWithoutDomainPluginsLoaded) {
+    Simulator simulator;
+    PluginManager* pluginManager = simulator.getPluginManager();
+    ASSERT_NE(pluginManager, nullptr);
+    pluginManager->autoInsertPlugins();
+
+    Model* model = simulator.getModelManager()->newModel();
+    ASSERT_NE(model, nullptr);
+
+    QMainWindow mainWindow;
+    ModelGraphicsScene scene(0, 0, 2000, 2000);
+    scene.setSimulator(&simulator);
+
+    // Report no loaded model plugins, so the domain-specific animation extensions
+    // (Queue/Resource/Station) are filtered out of the extension manager.
+    GuiExtensionManager extensionManager(&mainWindow);
+    GuiExtensionRuntimeContext context;
+    context.simulator = &simulator;
+    context.mainWindow = &mainWindow;
+    context.graphicsScene = &scene;
+    extensionManager.setPlugins(GuiExtensionPluginCatalog::resolvedPlugins());
+    extensionManager.setLoadedModelPluginIds({});
+    extensionManager.rebuild(context);
+    scene.setGuiExtensionManager(&extensionManager);
+
+    // Precondition: no domain plugins loaded => no domain animation contributions registered.
+    ASSERT_FALSE(hasAnimationContribution(extensionManager, "Queue"));
+    ASSERT_FALSE(hasAnimationContribution(extensionManager, "Resource"));
+    ASSERT_FALSE(hasAnimationContribution(extensionManager, "Station"));
+
+    // Nuclear animation: counter reflects the kernel Counter value.
+    auto* counter = new Counter(model, "Counter_1");
+    counter->clear();
+    counter->incCountValue(7.0);
+    auto* animationCounter = new AnimationCounter();
+    animationCounter->setCounter(counter);
+    animationCounter->setRect(0.0, 0.0, 80.0, 40.0);
+    scene.addItem(animationCounter);
+    ASSERT_TRUE(scene.addDrawingAnimation(animationCounter));
+
+    scene.animateCounter();
+    EXPECT_DOUBLE_EQ(animationCounter->getValue(), counter->getCountValue());
+    EXPECT_DOUBLE_EQ(animationCounter->getValue(), 7.0);
+
+    // Nuclear animation: clock/timer reflects the simulated time it is fed.
+    auto* animationTimer = new AnimationTimer(&scene);
+    animationTimer->setRect(0.0, 0.0, 80.0, 40.0);
+    scene.addItem(animationTimer);
+    ASSERT_TRUE(scene.addDrawingAnimation(animationTimer));
+
+    scene.animateTimer(240.0);
+    EXPECT_DOUBLE_EQ(animationTimer->getTime(), 240.0);
+
+    // Nuclear animation: statistics collector links by target name and refreshes.
+    auto* collectorDefinition = new StatisticsCollector(model, "WaitTimeCollector");
+    ASSERT_NE(collectorDefinition->getStatistics(), nullptr);
+    auto* stats = new AnimationStatistics();
+    stats->setTargetName(QStringLiteral("WaitTimeCollector"));
+    stats->setRect(0.0, 0.0, 80.0, 40.0);
+    scene.addItem(stats);
+    ASSERT_TRUE(scene.addDrawingAnimation(stats));
+
+    scene.setStatisticsCollectors();
+    scene.animateStatistics();
+    EXPECT_NE(stats->getCollector(), nullptr);
+    EXPECT_EQ(stats->getCollector(), collectorDefinition->getStatistics()->getCollector());
 }
 
 int main(int argc, char** argv) {
